@@ -15,40 +15,9 @@
 struct block_meta *first_sbrk, *last_sbrk;
 struct block_meta *first_mmap, *last_mmap;
 
-void *sbrk_allocation(size_t size) {
-    // allocate with mmap
-    void *p = sbrk(size);
+/*  allocating a block of memory based on the syscall used
+    and updating the coresponding lists */
 
-    // check if the syscall worked
-    DIE(p == ERROR, "sbrk failed");
-
-    // casting to block_meta type
-    struct block_meta *data = p;
-
-    // adding data to the allocated block
-    data->size = size - BLOCK_META_ALIGNEMENT;
-    data->next = NULL;
-    data->status = STATUS_ALLOC;
-
-    // adding to list
-    if (!first_sbrk) {
-        // first allocation
-        first_sbrk = data;
-        first_sbrk->prev = NULL;
-    } else {
-        /* making the linking between the allocated block and the last one
-        allocated with mmap */
-        last_sbrk->next = data;
-        data->prev = last_sbrk;
-    }
-
-    // now the last element of the mmap list is data
-    last_sbrk = data;
-
-    return (void *)((char *)p + BLOCK_META_ALIGNEMENT);
-}
-
-// combina cele doua functii de alocare(mmap_all si sbrk_all)
 void *allocation(void *p, size_t size, size_t type, struct block_meta **first,
                  struct block_meta **last) {
     // casting to block_meta type
@@ -77,6 +46,7 @@ void *allocation(void *p, size_t size, size_t type, struct block_meta **first,
     return (void *)((char *)p + BLOCK_META_ALIGNEMENT);
 }
 
+// ?????????????????????????????????????????????????????
 void split_block(struct block_meta *block, size_t size) {
     // split the block in 2 parts(one allocated and one not allocated)
     struct block_meta *unused =
@@ -98,6 +68,7 @@ void split_block(struct block_meta *block, size_t size) {
     }
 }
 
+// ??????????????????????????????????????????????????????
 void *find_best(size_t size) {
     struct block_meta *curr = first_sbrk;
     struct block_meta *block = NULL;
@@ -130,13 +101,7 @@ void *find_best(size_t size) {
     return NULL;
 }
 
-void *preallocation(size_t size) {
-    // call sbrk for allocating
-    void *p = sbrk(MMAP_THRESHOLD);
-
-    // check the error code of the syscall
-    DIE(p == ERROR, "sbrk failed");
-
+void *preallocation(void *p, size_t size) {
     // casting to struct block_meta
     struct block_meta *data = (struct block_meta *)p;
 
@@ -146,8 +111,7 @@ void *preallocation(size_t size) {
     // set header
     data->size = MMAP_THRESHOLD - BLOCK_META_ALIGNEMENT;
     data->status = STATUS_ALLOC;
-    data->next = NULL;
-    data->prev = NULL;
+    data->next = data->prev = NULL;
 
     /* check if we do not use the entire preallocation space */
     if (data->size - size > BLOCK_META_ALIGNEMENT) {
@@ -159,7 +123,7 @@ void *preallocation(size_t size) {
 }
 
 // adaugi legaturile pentru lista dubla
-void sbrk_coalesce(struct block_meta *first, struct block_meta *second) {
+void combine(struct block_meta *first, struct block_meta *second) {
     // making the links
     first->next = second->next;
     first->size = first->size + second->size + BLOCK_META_ALIGNEMENT;
@@ -170,73 +134,75 @@ void sbrk_coalesce(struct block_meta *first, struct block_meta *second) {
     }
 }
 
-/* Allocates size bytes of memory */
 void *os_malloc(size_t size) {
     // if the size is <= 0 we can't alloc memory
-    if (size <= 0) {
-        return NULL;
-    }
+    if (size > 0) {
+        size_t block_size = ALIGN(size + BLOCK_META_ALIGNEMENT);
+        size_t current_size = ALIGN(size);
+        void *p = NULL;
 
-    size_t block_size = ALIGN(size + BLOCK_META_ALIGNEMENT);
-    size_t current_size = ALIGN(size);
+        // preallocation
+        if (!first_sbrk && block_size < MMAP_THRESHOLD) {
+            // call sbrk for allocating
+            p = sbrk(MMAP_THRESHOLD);
 
-    // preallocation
-    if (!first_sbrk && block_size < MMAP_THRESHOLD)
-        return preallocation(current_size);
+            // check the error code of the syscall
+            DIE(p == ERROR, "sbrk failed");
+            p = preallocation(p, current_size);
+            return p;
+        }
 
-    void *p = NULL;
+        /* if the block is bigger than MMAP_THRESHOLD
+            we need to allocate memory with mmap */
+        if (block_size > MMAP_THRESHOLD) {
+            p = mmap(NULL, block_size, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANON, -1, 0);
 
-    /* if the block is bigger than MMAP_THRESHOLD
-        we need to allocate memory with mmap */
-    if (block_size > MMAP_THRESHOLD) {
-        p = mmap(NULL, block_size, PROT_READ | PROT_WRITE,
-                 MAP_PRIVATE | MAP_ANON, -1, 0);
+            // check if the syscall worked
+            DIE(p == ERROR, "mmap failed");
 
-        // check if the syscall worked
-        DIE(p == ERROR, "mmap failed");
+            p = allocation(p, block_size, STATUS_MAPPED, &first_mmap,
+                           &last_mmap);
+            memset(p, 0, current_size);
+            return p;
+        }
 
-        p = allocation(p, block_size, STATUS_MAPPED, &first_mmap, &last_mmap);
-        // p = mmap_allocation(block_size);
-        memset(p, 0, current_size);
-        return p;
-    }
+        p = find_best(current_size);
 
-    p = find_best(current_size);
-    if (p) {
         // we find a continuous memory zone
-        return p;
-    }
+        if (p) return p;
 
-    if (last_sbrk->status == STATUS_FREE) {
-        // expending the last block
-        size_t last = current_size - last_sbrk->size;
-        p = sbrk(last);
+        if (last_sbrk->status == STATUS_FREE) {
+            // expending the last block
+            size_t last = current_size - last_sbrk->size;
+            p = sbrk(last);
+
+            // check if the syscall worked
+            DIE(p == ERROR, "sbrk");
+
+            last_sbrk->size = current_size;
+            last_sbrk->status = STATUS_ALLOC;
+
+            // the address from the start of the payload
+            return (void *)(last_sbrk + 1);
+        }
+
+        // allocate with sbrk
+        p = sbrk(block_size);
 
         // check if the syscall worked
-        DIE(p == ERROR, "sbrk");
+        DIE(p == ERROR, "sbrk failed");
 
-        last_sbrk->size = current_size;
-        last_sbrk->status = STATUS_ALLOC;
-
-        // the address from the start of the payload
-        return (void *)(last_sbrk + 1);
+        return allocation(p, block_size, STATUS_ALLOC, &first_sbrk, &last_sbrk);
     }
-
-    // // allocate with sbrk
-    // p = sbrk(block_size);
-
-    // // check if the syscall worked
-    // DIE(p == ERROR, "sbrk failed");
-
-    // return allocation(p, block_size, STATUS_ALLOC);
-    return sbrk_allocation(block_size);
+    return NULL;
 }
 
-/* Frees memory of ptr */
 void os_free(void *ptr) {
-    // Check if ptr is NULL
+    // checking if ptr is NULL
     if (ptr) {
-        struct block_meta *curr, *ant = NULL;
+        struct block_meta *curr = NULL;
+        struct block_meta *ant = NULL;
         struct block_meta *data = (struct block_meta *)ptr - 1;
 
         // if the block was allocated with mmap
@@ -280,66 +246,90 @@ void os_free(void *ptr) {
             curr = curr->next;
         }
 
-        // Coalesce free blocks together
-        if (data->next && ant && data->next->status == STATUS_FREE &&
-            ant->status == STATUS_FREE) {
-            // Coalesce all three blocks (prev, current, next) free blocks
-            sbrk_coalesce(ant, data->next);
-            ant->size += BLOCK_META_ALIGNEMENT + data->size;
-        } else if (curr && ant && ant->status == STATUS_FREE) {
-            // Coalesce previous and current
-            sbrk_coalesce(ant, data);
-        } else if (data->next && data->next->status == STATUS_FREE) {
-            // Coalesce current and next
-            sbrk_coalesce(data, data->next);
+        // checking if the anteriour block is freed
+        if (ant && ant->status == STATUS_FREE) {
+            // checking if the next is also freed
+            if (data->next && data->next->status == STATUS_FREE) {
+                // combine all three and reset the size of the block
+                combine(ant, data->next);
+                ant->size += BLOCK_META_ALIGNEMENT + data->size;
+            } else
+                // combine anteriour and current
+                combine(ant, data);
+        } else {
+            if (data->next && data->next->status == STATUS_FREE) {
+                // combine current and the next one
+                combine(data, data->next);
+            }
         }
     }
 }
 
-// O FACI MAI BUNA
-/* Allocates size bytes of memory and initializes the memory to ZERO */
 void *os_calloc(size_t nmemb, size_t size) {
     // Calculate the total amount of memory
-    // size_t total = nmemb * size;
+    size_t total = nmemb * size;
 
-    // // overflow or parameter is zero
-    // if (total == 0 || total / nmemb != size || total / size != nmemb) {
-    //     return NULL;
-    // }
+    // overflow or parameter is zero
+    if (total == 0 || total / nmemb != size || total / size != nmemb) {
+        return NULL;
+    }
 
-    // size_t block_size = ALIGN(total + BLOCK_META_ALIGNEMENT);
-    // size_t current_size = ALIGN(total);
+    size_t block_size = ALIGN(total + BLOCK_META_ALIGNEMENT);
+    size_t current_size = ALIGN(total);
+    size_t page_size = (size_t)getpagesize();
+    void *p = NULL;
 
-    // size_t page_size = (size_t)getpagesize();
-    // void *p = NULL;
+    if (!first_sbrk && block_size < page_size) {
+        p = preallocation(p, current_size);
+    } else {
+        if (block_size > page_size) {
+            // p = mmap_allocation(block_size);
+            p = mmap(NULL, block_size, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANON, -1, 0);
 
-    // if (!first_sbrk && block_size < page_size) {
-    //     p = preallocation(current_size);
-    // } else {
-    //     if (block_size > page_size) {
-    //         p = mmap_allocation(block_size);
-    //         memset(p, 0, total);
-    //         return p;
-    //     }
+            // check if the syscall worked
+            DIE(p == ERROR, "mmap failed");
 
-    //     p = find_best(current_size);
+            p = allocation(p, block_size, STATUS_MAPPED, &first_mmap,
+                           &last_mmap);
+            memset(p, 0, total);
+            return p;
+        }
 
-    //     if (p) {
-    //         memset(p, 0, total);
-    //         return p;
-    //     }
+        p = find_best(current_size);
 
-    //     if (last_sbrk->status == STATUS_FREE) {
-    //         p = last_block_allocation(current_size);
-    //         memset(p, 0, nmemb * size);
-    //         return p;
-    //     }
+        if (p) {
+            memset(p, 0, total);
+            return p;
+        }
 
-    //     p = sbrk_allocation(block_size);
-    // }
-    // memset(p, 0, total);
-    // return p;
-    return NULL;
+        if (last_sbrk->status == STATUS_FREE) {
+            // expending the last block
+            size_t last = current_size - last_sbrk->size;
+            p = sbrk(last);
+
+            // check if the syscall worked
+            DIE(p == ERROR, "sbrk");
+
+            last_sbrk->size = current_size;
+            last_sbrk->status = STATUS_ALLOC;
+
+            // the address from the start of the payload
+            p = (void *)(last_sbrk + 1);
+            memset(p, 0, nmemb * size);
+            return p;
+        }
+        // allocate with sbrk
+        p = sbrk(block_size);
+
+        // check if the syscall worked
+        DIE(p == ERROR, "sbrk failed");
+
+        p = allocation(p, block_size, STATUS_ALLOC, &first_sbrk, &last_sbrk);
+    }
+    memset(p, 0, total);
+    return p;
+    // return NULL;
 }
 
 // MODIFICI AICI
@@ -376,7 +366,7 @@ void *os_realloc(void *ptr, size_t size) {  // Invalid realloc
     //     if (meta->next->status == STATUS_FREE &&
     //         meta->next->size + meta->size + BLOCK_META_ALIGNEMENT >=
     //             element_size) {
-    //         sbrk_coalesce(meta, meta->next);
+    //         combine(meta, meta->next);
     //         split_block(meta, element_size);
 
     //         return (void *)(meta + 1);
