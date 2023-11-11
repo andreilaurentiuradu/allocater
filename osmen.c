@@ -15,7 +15,18 @@
 struct block_meta *first_heap, *last_heap;
 struct block_meta *first_mmap, *last_mmap;
 
-/* Allocates memory using mmap() and inserts it into mmap list. */
+void *last_block_allocation(size_t size) {
+    size_t remaining = size - last_heap->size;
+    void *ret = sbrk(remaining);
+
+    DIE(ret == ERROR, "sbrk");
+
+    last_heap->size = size;
+    last_heap->status = STATUS_ALLOC;
+
+    // Return a pointer to the start of the payload
+    return (void *)(last_heap + 1);
+}
 void *mmap_allocation(size_t size) {
     // allocate with mmap
     void *p =
@@ -36,11 +47,12 @@ void *mmap_allocation(size_t size) {
     if (!first_mmap) {
         // first allocation
         first_mmap = data;
+        first_mmap->prev = NULL;
     } else {
         /* making the linking between the allocated block and the last
         one allocated with mmap */
         last_mmap->next = data;
-        // data->prev = last_mmap;
+        data->prev = last_mmap;
     }
 
     // now the last element of the mmap list is data
@@ -68,6 +80,7 @@ void *heap_allocation(size_t size) {
     if (!first_heap) {
         // first allocation
         first_heap = data;
+        first_heap->prev = NULL;
     } else {
         /* making the linking between the allocated block and the last one
         allocated with mmap */
@@ -162,19 +175,7 @@ void *preallocation(size_t size) {
     return (void *)((char *)(data) + BLOCK_META_ALIGNEMENT);
 }
 
-void *last_block_allocation(size_t size) {
-    size_t remaining = size - last_heap->size;
-    void *ret = sbrk(remaining);
-
-    DIE(ret == ERROR, "sbrk");
-
-    last_heap->size = size;
-    last_heap->status = STATUS_ALLOC;
-
-    // Return a pointer to the start of the payload
-    return (void *)(last_heap + 1);
-}
-
+// adaugi legaturile pentru lista dubla
 void heap_coalesce(struct block_meta *first, struct block_meta *second) {
     // making the links
     first->next = second->next;
@@ -273,15 +274,15 @@ void os_free(void *ptr) {
         }
 
         // Coalesce free blocks together
-        if (data->next != NULL && ant != NULL &&
-            data->next->status == STATUS_FREE && ant->status == STATUS_FREE) {
+        if (data->next && ant && data->next->status == STATUS_FREE &&
+            ant->status == STATUS_FREE) {
             // Coalesce all three blocks (prev, current, next) free blocks
             heap_coalesce(ant, data->next);
             ant->size += BLOCK_META_ALIGNEMENT + data->size;
-        } else if (curr != NULL && ant != NULL && ant->status == STATUS_FREE) {
+        } else if (curr && ant && ant->status == STATUS_FREE) {
             // Coalesce previous and current
             heap_coalesce(ant, data);
-        } else if (data->next != NULL && data->next->status == STATUS_FREE) {
+        } else if (data->next && data->next->status == STATUS_FREE) {
             // Coalesce current and next
             heap_coalesce(data, data->next);
         }
