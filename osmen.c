@@ -16,7 +16,7 @@ struct block_meta *first_sbrk, *last_sbrk;
 struct block_meta *first_mmap, *last_mmap;
 
 /*  allocating a block of memory based on the syscall used
-    and updating the coresponding lists */
+                                and updating the coresponding lists */
 
 void *allocation(void *p, size_t size, size_t type, struct block_meta **first,
                  struct block_meta **last) {
@@ -53,7 +53,7 @@ void split_block(struct block_meta *block, size_t size) {
         (struct block_meta *)((char *)(block) + size + BLOCK_META_ALIGNEMENT);
 
     /*set the fields and make the links between
-        the splitted blocks and "neighbour" blocks*/
+                                    the splitted blocks and "neighbour" blocks*/
     unused->status = STATUS_FREE;
     unused->prev = block;
     unused->next = block->next;
@@ -76,8 +76,8 @@ void *find_best(size_t size) {
 
     // searching the best block from sbrk list
     while (curr) {
-        // check if the block from sbrk list is free and it has a proper size
-        // and it has a smaller size than the previous proper one
+        /* check if the block from sbrk list is free and it has a proper size
+        and it has a smaller size than the previous proper one */
         if (curr->status == STATUS_FREE && curr->size >= size &&
             curr->size - size <= find_min) {
             block = curr;
@@ -135,8 +135,8 @@ void combine(struct block_meta *first, struct block_meta *second) {
 }
 
 void *os_malloc(size_t size) {
-    // if the size is <= 0 we can't alloc memory
-    if (size > 0) {
+    // if the size is 0 we can't alloc memory
+    if (size) {
         size_t block_size = ALIGN(size + BLOCK_META_ALIGNEMENT);
         size_t current_size = ALIGN(size);
         void *p = NULL;
@@ -153,7 +153,7 @@ void *os_malloc(size_t size) {
         }
 
         /* if the block is bigger than MMAP_THRESHOLD
-            we need to allocate memory with mmap */
+                                        we need to allocate memory with mmap */
         if (block_size > MMAP_THRESHOLD) {
             p = mmap(NULL, block_size, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANON, -1, 0);
@@ -266,7 +266,7 @@ void os_free(void *ptr) {
 }
 
 void *os_calloc(size_t nmemb, size_t size) {
-    // Calculate the total amount of memory
+    // total amount of memory to be allocated
     size_t total = nmemb * size;
 
     // overflow or parameter is zero
@@ -276,91 +276,102 @@ void *os_calloc(size_t nmemb, size_t size) {
 
     size_t block_size = ALIGN(total + BLOCK_META_ALIGNEMENT);
     size_t current_size = ALIGN(total);
-    size_t page_size = (size_t)getpagesize();
+    size_t page = getpagesize();
     void *p = NULL;
 
-    if (!first_sbrk && block_size < page_size) {
+    if (!first_sbrk && block_size < page) {
+        // call sbrk for allocating
+        p = sbrk(MMAP_THRESHOLD);
+
+        // check if the syscall worked
+        DIE(p == ERROR, "sbrk failed");
         p = preallocation(p, current_size);
     } else {
-        if (block_size > page_size) {
-            // p = mmap_allocation(block_size);
+        if (block_size > page) {
             p = mmap(NULL, block_size, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANON, -1, 0);
 
             // check if the syscall worked
             DIE(p == ERROR, "mmap failed");
-
             p = allocation(p, block_size, STATUS_MAPPED, &first_mmap,
                            &last_mmap);
-            memset(p, 0, total);
-            return p;
+        } else {
+            p = find_best(current_size);
+            if (!p) {
+                if (last_sbrk->status == STATUS_FREE) {
+                    // expending the last block
+                    size_t last = current_size - last_sbrk->size;
+                    p = sbrk(last);
+
+                    // check if the syscall worked
+                    DIE(p == ERROR, "sbrk");
+
+                    // update the last block of sbrk list
+                    last_sbrk->size = current_size;
+                    last_sbrk->status = STATUS_ALLOC;
+
+                    // the address from the start of the payload
+                    p = last_sbrk + 1;
+                } else {
+                    // allocate with sbrk
+                    p = sbrk(block_size);
+
+                    // check if the syscall worked
+                    DIE(p == ERROR, "sbrk failed");
+                    p = allocation(p, block_size, STATUS_ALLOC, &first_sbrk,
+                                   &last_sbrk);
+                }
+            }
         }
-
-        p = find_best(current_size);
-
-        if (p) {
-            memset(p, 0, total);
-            return p;
-        }
-
-        if (last_sbrk->status == STATUS_FREE) {
-            // expending the last block
-            size_t last = current_size - last_sbrk->size;
-            p = sbrk(last);
-
-            // check if the syscall worked
-            DIE(p == ERROR, "sbrk");
-
-            last_sbrk->size = current_size;
-            last_sbrk->status = STATUS_ALLOC;
-
-            // the address from the start of the payload
-            p = (void *)(last_sbrk + 1);
-            memset(p, 0, nmemb * size);
-            return p;
-        }
-        // allocate with sbrk
-        p = sbrk(block_size);
-
-        // check if the syscall worked
-        DIE(p == ERROR, "sbrk failed");
-
-        p = allocation(p, block_size, STATUS_ALLOC, &first_sbrk, &last_sbrk);
     }
     memset(p, 0, total);
     return p;
     // return NULL;
 }
 
-// MODIFICI AICI
-/* Reallocates pointer ptr to exactly size bytes of memory */
-void *os_realloc(void *ptr, size_t size) {  // Invalid realloc
-    // if (ptr == NULL && size == 0) return NULL;
+void *os_realloc(void *ptr, size_t size) {
+    // Invalid realloc
+    if (ptr == NULL && size == 0) return NULL;
 
-    // // Free ptr
-    // if (size == 0) {
-    //     os_free(ptr);
-    //     return NULL;
-    // }
+    // Free ptr
+    if (size == 0) {
+        os_free(ptr);
+        return NULL;
+    }
 
-    // // Allocate memory normally
-    // if (ptr == NULL) return os_malloc(size);
+    // Allocate memory normally
+    if (ptr == NULL) return os_malloc(size);
 
-    // // Align the memory
-    // size_t element_size = ALIGN(size);
-    // struct block_meta *meta =
-    //     (struct block_meta *)(ptr - BLOCK_META_ALIGNEMENT);
+    // Align the memory
+    size_t element_size = ALIGN(size);
+    struct block_meta *meta =
+        (struct block_meta *)((char *)(ptr)-BLOCK_META_ALIGNEMENT);
+    void *p = NULL;
 
-    // // Invalid use of realloc
-    // if (meta->status == STATUS_FREE) return NULL;
+    // Invalid use of realloc
+    if (meta->status == STATUS_FREE) return NULL;
 
-    // // No reason to reallocate, size already matches
-    // if (meta->size == element_size) return ptr;
+    // No reason to reallocate, size already matches
+    if (meta->size == element_size) return ptr;
 
     // // Try not to move memory in order to increase it
     // if (element_size > meta->size && meta->status == STATUS_ALLOC) {
     //     // Try to expand the last block
-    //     if (meta == last_sbrk) return last_block_allocation(element_size);
+    //     if (meta == last_sbrk) {
+    //         // expending the last block
+    //         size_t last = element_size - last_sbrk->size;
+    //         p = sbrk(last);
+
+    //         // check if the syscall worked
+    //         DIE(p == ERROR, "sbrk");
+
+    //         // update the last block of sbrk list
+    //         last_sbrk->size = element_size;
+    //         last_sbrk->status = STATUS_ALLOC;
+
+    //         // the address from the start of the payload
+    //         p = (char *)(last_sbrk) + 1;
+    //     }
 
     //     // Try to coalesce the block with the next one
     //     if (meta->next->status == STATUS_FREE &&
@@ -373,17 +384,16 @@ void *os_realloc(void *ptr, size_t size) {  // Invalid realloc
     //     }
     // }
 
-    // // Split the block because the new size is smaller than the previous one
+    // // Split the block because the new size is smaller than the previous
     // if (element_size < meta->size && meta->status == STATUS_ALLOC) {
     //     split_block(meta, element_size);
     //     return ptr;
     // }
 
-    // // The memory needs to be moved to another block
-    // void *p = os_malloc(size);
+    // The memory needs to be moved to another block
+    p = os_malloc(size);
 
-    // memcpy(p, ptr, size < meta->size ? size : meta->size);
-    // os_free(ptr);
-    // return p;
-    return NULL;
+    memcpy(p, ptr, size < meta->size ? size : meta->size);
+    os_free(ptr);
+    return p;
 }
